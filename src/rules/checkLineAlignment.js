@@ -1,27 +1,25 @@
-import {
-  transforms,
-} from 'comment-parser';
-import iterateJsdoc from '../iterateJsdoc';
+import { transforms } from 'comment-parser';
+import { rewireSpecs } from 'comment-parser/lib/util';
+import { cloneDeep } from 'lodash';
+import iterateJsdoc from '../iterateJsdoc.js';
 
-const {
-  flow: commentFlow,
-  align: commentAlign,
-  indent: commentIndent,
-} = transforms;
+const commentAlign = transforms.align;
+const commentFlow = transforms.flow;
+const commentIndent = transforms.indent;
 
-const checkNotAlignedPerTag = (utils, tag) => {
+const checkNotAlignedPerTag = function (utils, tag) {
   /*
-  start +
-  delimiter +
-  postDelimiter +
-  tag +
-  postTag +
-  type +
-  postType +
-  name +
-  postName +
-  description +
-  end
+    start +
+    delimiter +
+    postDelimiter +
+    tag +
+    postTag +
+    type +
+    postType +
+    name +
+    postName +
+    description +
+    end
    */
   let spacerProps;
   let contentProps;
@@ -34,20 +32,20 @@ const checkNotAlignedPerTag = (utils, tag) => {
     contentProps = ['tag', 'type', 'description'];
   }
 
-  const {tokens} = tag.source[0];
+  const tokens = tag.source[0]?.tokens;
 
-  const followedBySpace = (idx, callbck) => {
-    const nextIndex = idx + 1;
+  const followedBySpace = function (index, callback) {
+    const nextIndex = index + 1;
 
-    return spacerProps.slice(nextIndex).some((spacerProp, innerIdx) => {
-      const contentProp = contentProps[nextIndex + innerIdx];
+    return spacerProps.slice(nextIndex).some(function (spacerProp, innerIndex) {
+      const contentProp = contentProps[nextIndex + innerIndex];
 
       const spacePropVal = tokens[spacerProp];
 
       const ret = spacePropVal;
 
-      if (callbck) {
-        callbck(!ret, contentProp);
+      if (callback) {
+        callback(!ret, contentProp);
       }
 
       return ret;
@@ -58,31 +56,29 @@ const checkNotAlignedPerTag = (utils, tag) => {
   //   items
   // Go through `post*` spacing properties and exit to indicate problem if
   //   extra spacing detected
-  const ok = !spacerProps.some((spacerProp, idx) => {
-    const contentProp = contentProps[idx];
-    const contentPropVal = tokens[contentProp];
-    const spacerPropVal = tokens[spacerProp];
+  const ok = !spacerProps.some(function (spacerProp, index) {
+    const contentProp = contentProps[index];
+    const contentPropValue = tokens[contentProp];
+    const spacerPropValue = tokens[spacerProp];
 
     // There will be extra alignment if...
+    // There is a (single) space, no immediate content, and yet another space is found subsequently (not separated by intervening content)
+    const singleSpaceNoImmediateContentSubsequentSpace = spacerPropValue && !contentPropValue && followedBySpace(index);
+    const extraWhitespacInASingleSpacerSegment = spacerPropValue.length > 1;
 
-    // 1. There is extra whitespace within a single spacer segment OR
-    return spacerPropVal.length > 1 ||
-
-      // 2. There is a (single) space, no immediate content, and yet another
-      //     space is found subsequently (not separated by intervening content)
-      spacerPropVal && !contentPropVal && followedBySpace(idx);
+    return extraWhitespacInASingleSpacerSegment || singleSpaceNoImmediateContentSubsequentSpace;
   });
   if (ok) {
     return;
   }
-  const fix = () => {
-    spacerProps.forEach((spacerProp, idx) => {
-      const contentProp = contentProps[idx];
-      const contentPropVal = tokens[contentProp];
+  const fix = function () {
+    spacerProps.forEach(function (spacerProp, index) {
+      const contentProp = contentProps[index];
+      const contentPropValue = tokens[contentProp];
 
-      if (contentPropVal) {
+      if (contentPropValue) {
         tokens[spacerProp] = ' ';
-        followedBySpace(idx, (hasSpace, contentPrp) => {
+        followedBySpace(index, function (hasSpace, contentPrp) {
           if (hasSpace) {
             tokens[contentPrp] = '';
           }
@@ -97,41 +93,87 @@ const checkNotAlignedPerTag = (utils, tag) => {
   utils.reportJSDoc('Expected JSDoc block lines to not be aligned.', tag, fix, true);
 };
 
-const checkAlignment = ({
-  indent,
-  jsdoc,
-  jsdocNode,
-  report,
-  utils,
-}) => {
-  const transform = commentFlow(commentAlign(), commentIndent(indent.length));
-  const transformedJsdoc = transform(jsdoc);
+const filterApplicableTags = function (jsdoc, applicableTags) {
+  const filteredJsdoc = {
+    ...jsdoc,
+    source: jsdoc.source.filter(function (source) {
+      if (source.tokens.tag === '') {
+        return true;
+      }
 
-  const comment = '/*' + jsdocNode.value + '*/';
-  const formatted = utils.stringify(transformedJsdoc)
-    .trimStart();
+      return applicableTags.includes(source.tokens.tag.replace('@', ''));
+    }),
+    tags: jsdoc.tags.filter(function (tag) {
+      return applicableTags.includes(tag.tag);
+    }),
+  };
 
-  if (comment !== formatted) {
-    report(
-      'Expected JSDoc block lines to be aligned.',
-      (fixer) => {
-        return fixer.replaceText(jsdocNode, formatted);
-      },
-    );
-  }
+  return rewireSpecs(filteredJsdoc);
 };
 
-export default iterateJsdoc(({
-  indent,
-  jsdoc,
-  jsdocNode,
-  report,
-  context,
-  utils,
-}) => {
-  const {
-    tags: applicableTags = ['param', 'arg', 'argument', 'property', 'prop', 'returns', 'return'],
-  } = context.options[1] || {};
+const getJsondocFormatted = function ({ applicableTags, indent, jsdoc, utils }) {
+  // It needs to be cloned. Otherwise, the transform overrides the original object.
+  const jsdocClone = cloneDeep(jsdoc);
+  const transform = commentFlow(commentAlign(), commentIndent(indent.length));
+  const filteredClone = filterApplicableTags(jsdocClone, applicableTags);
+  const transformedJsdoc = transform(filteredClone);
+  const formatted = utils.stringify(transformedJsdoc);
+  const parsed = utils.commentParser({value: formatted}, indent, false);
+
+  console.log(commentFlow(commentAlign())(parsed));
+
+  return commentFlow(commentAlign())(parsed);
+};
+
+const isTagSourcesEqual = function (tag, otherTag) {
+  return tag.source.every(function (source, index) {
+    return source.source === otherTag.source[index].source;
+  });
+};
+
+const getFormattedSource = function (tag, formattedTag) {
+  return formattedTag.source.map(function (source, index) {
+    return {
+      ...source,
+      number: tag.source[index].number
+    };
+  });
+};
+
+const checkAlignment = function ({ applicableTags, foundTags, indent, jsdoc, utils }) {
+  const jsdocFormatted = getJsondocFormatted({
+    applicableTags,
+    indent,
+    jsdoc,
+    utils
+  });
+
+  foundTags.forEach(function (tag, index) {
+    const formattedTag = jsdocFormatted.tags[index];
+    if (!isTagSourcesEqual(tag, formattedTag)) {
+      const fix = function () {
+        const formattedSource = getFormattedSource(tag, formattedTag);
+        utils.replaceTagSource(tag, formattedSource);
+      };
+      utils.reportJSDoc('Expected JSDoc block lines to be aligned.', tag, fix, true);
+    }
+  });
+};
+
+const iterator = function ({ indent, jsdoc, jsdocNode, context, utils }) {
+  const userTags = context.options?.[1]?.tags;
+  const defaultTags = [
+    'param',
+    'arg',
+    'argument',
+    'property',
+    'prop',
+    'returns',
+    'return'
+  ];
+  const applicableTags = userTags || defaultTags;
+
+  const foundTags = utils.getPresentTags(applicableTags);
 
   if (context.options[0] === 'always') {
     // Skip if it contains only a single line.
@@ -140,23 +182,25 @@ export default iterateJsdoc(({
     }
 
     checkAlignment({
+      applicableTags,
+      foundTags,
       indent,
       jsdoc,
-      jsdocNode,
-      report,
-      utils,
+      utils
     });
 
     return;
   }
 
-  const foundTags = utils.getPresentTags(applicableTags);
-  foundTags.forEach((tag) => {
+  foundTags.forEach(function (tag) {
     checkNotAlignedPerTag(utils, tag);
   });
-}, {
+}
+
+const ruleConfig = {
   iterateAllJsdocs: true,
   meta: {
+    type: 'layout',
     docs: {
       description: 'Reports invalid alignment of JSDoc block lines.',
       url: 'https://github.com/gajus/eslint-plugin-jsdoc#eslint-plugin-jsdoc-rules-check-line-alignment',
@@ -164,22 +208,23 @@ export default iterateJsdoc(({
     fixable: 'whitespace',
     schema: [
       {
-        enum: ['always', 'never'],
         type: 'string',
+        enum: ['always', 'never']
       },
       {
+        type: 'object',
         additionalProperties: false,
         properties: {
           tags: {
-            items: {
-              type: 'string',
-            },
             type: 'array',
-          },
-        },
-        type: 'object',
-      },
-    ],
-    type: 'layout',
-  },
-});
+            items: {
+              type: 'string'
+            }
+          }
+        }
+      }
+    ]
+  }
+};
+
+export default iterateJsdoc(iterator, ruleConfig);
